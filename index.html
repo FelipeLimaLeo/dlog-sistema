@@ -95,11 +95,12 @@
   <div class="card" id="itemsCard" style="display:none;">
     <h2>3. Itens — confira e complete os campos em amarelo</h2>
     <div class="hint">
-      Campos em <b>amarelo</b> precisam ser conferidos/preenchidos manualmente. Vindo do <b>PDF</b>: Peso Líquido e Regime Aduaneiro (o País já é convertido
-      automaticamente para o código Siscomex, ex: Alemanha → 023, Reino Unido → 628). Vindo do <b>Excel do Sistema</b>: Peso e Regime já vêm preenchidos
-      (extraídos do próprio Sistema), mas o <b>País Siscomex</b> precisa ser preenchido manualmente, pois o Sistema não guarda o país de fabricação por item.
-      A ferramenta lembra todos esses valores por <b>Part Number</b> — da próxima vez que esse item aparecer, em qualquer fatura ou fonte, ele já vem preenchido sozinho.
-      Confira também <b>NUM_FATURA</b> e <b>DATA_FATURA</b> acima quando a fonte for o Excel do Sistema (ele não guarda a data da fatura).
+      <b>Peso Líquido:</b> rateado automaticamente. O PDF só traz o peso líquido TOTAL da fatura — a ferramenta compara com a soma do peso por item do
+      Sistema (que costuma vir errado) e distribui a diferença entre os itens proporcionalmente ao valor de cada um (quem vale mais, absorve mais da
+      diferença), pra mais ou pra menos, até bater exatamente com o total do PDF. Pode editar manualmente se precisar ajustar um item específico.
+      <br><b>País Siscomex:</b> convertido automaticamente quando vem do PDF (ex: Alemanha → 023, Reino Unido → 628); em <b>amarelo</b> quando precisa
+      ser preenchido manualmente (o Sistema não guarda o país de fabricação por item). <b>Regime Aduaneiro</b> vem do Sistema quando disponível.
+      A ferramenta lembra tudo por <b>Part Number</b> para a próxima fatura. Confira também <b>NUM_FATURA</b> e <b>DATA_FATURA</b> acima.
     </div>
     <div class="tablewrap"><table id="itemsTable">
       <thead>
@@ -345,6 +346,38 @@ function mergeSources(pdf, sistema){
   return {merged, unmatchedCount: unmatchedPdf.length};
 }
 
+// ---------- Rateio automático do peso líquido ----------
+// O PDF só traz o peso líquido TOTAL da fatura ("Total Net Wt (Kg)"), nunca por item.
+// O peso por item do Sistema costuma estar incorreto. Esta função ajusta o peso de
+// cada item proporcionalmente ao seu valor (qty × preço unitário), de modo que a soma
+// final bata exatamente com o total do PDF — tanto para acrescentar peso que falta
+// quanto para remover peso que sobra.
+function redistributeWeights(totalNetWeight){
+  if(totalNetWeight === null || totalNetWeight === undefined || !rows.length) return '';
+
+  const baseWeight = rows.map(r=>{
+    const unit = (r.pesoUnitarioSistema !== undefined && r.pesoUnitarioSistema !== '')
+      ? Number(r.pesoUnitarioSistema)
+      : Number((MEM.parts[r.part] || {}).peso || 0);
+    return unit * (Number(r.qty) || 0);
+  });
+  const sumBase = baseWeight.reduce((a,b)=>a+b, 0);
+  const diff = totalNetWeight - sumBase;
+
+  const value = rows.map(r=>(Number(r.price)||0) * (Number(r.qty)||0));
+  const sumValue = value.reduce((a,b)=>a+b, 0);
+  if(sumValue <= 0) return `Peso do PDF: ${totalNetWeight} kg (não foi possível ratear: soma dos valores dos itens é zero).`;
+
+  rows.forEach((r,i)=>{
+    const newTotalWeight = baseWeight[i] + diff * (value[i] / sumValue);
+    const qty = Number(r.qty) || 1;
+    r.pesoUnitarioSistema = Math.max(0, newTotalWeight / qty);
+  });
+
+  const sign = diff >= 0 ? 'faltava' : 'sobrava';
+  return `Peso líquido rateado pelo valor dos itens: PDF ${totalNetWeight} kg × Sistema ${sumBase.toFixed(3)} kg (${sign} ${Math.abs(diff).toFixed(3)} kg, ajustado automaticamente).`;
+}
+
 function recompute(){
   if(pdfSource && sistemaSource){
     const {merged, unmatchedCount} = mergeSources(pdfSource, sistemaSource);
@@ -357,6 +390,7 @@ function recompute(){
     let msg = `De-para feito: ${rows.length} itens do Sistema, ${rows.length - notMatched} casados com o PDF (país preenchido automaticamente).`;
     if(notMatched>0) msg += ` ${notMatched} item(ns) do Sistema sem correspondência no PDF — preencher o país manualmente.`;
     if(unmatchedCount>0) msg += ` ${unmatchedCount} linha(s) do PDF não usadas (sobrando).`;
+    msg += ' ' + redistributeWeights(pdfSource.totalNetWeight);
     setStatus(msg);
   }else if(pdfSource){
     rows = pdfSource.rows;
@@ -364,7 +398,9 @@ function recompute(){
     invoiceDate = pdfSource.invoiceDate;
     companyName = pdfSource.companyName;
     codExportadorHint = '';
-    setStatus(`PDF lido com sucesso: ${rows.length} itens encontrados. Solte também o Excel do Sistema para casar peso/regime automaticamente.`);
+    let msg = `PDF lido com sucesso: ${rows.length} itens encontrados. Solte também o Excel do Sistema para casar peso/regime automaticamente.`;
+    msg += ' ' + redistributeWeights(pdfSource.totalNetWeight);
+    setStatus(msg);
   }else if(sistemaSource){
     rows = sistemaSource.rows.map(r=>({...r, country:'', countryName:''}));
     invoiceNumber = sistemaSource.invoiceNumber;
@@ -384,8 +420,11 @@ function renderTable(){
   tbody.innerHTML = '';
   rows.forEach((r, idx)=>{
     const mem = MEM.parts[r.part] || {};
-    const pesoDefault = (r.pesoUnitarioSistema !== undefined && r.pesoUnitarioSistema !== '') ? r.pesoUnitarioSistema : '';
-    r.pesoLiquido = mem.peso ?? pesoDefault;
+    // Prioridade do peso: o peso calculado para ESTA fatura (seja o original do Sistema,
+    // seja o já rateado contra o total do PDF) vale mais que uma memória de outra fatura.
+    // A memória só serve de fallback quando não há nenhum peso calculado agora.
+    const pesoDefault = (r.pesoUnitarioSistema !== undefined && r.pesoUnitarioSistema !== '') ? Number(r.pesoUnitarioSistema) : '';
+    r.pesoLiquido = (pesoDefault !== '') ? pesoDefault : (mem.peso ?? '');
     r.regime = mem.regime ?? r.regimeSistema ?? '12';
     r.paisSiscomex = mem.pais ?? toSiscomex(r.country);
 
@@ -400,7 +439,7 @@ function renderTable(){
       <td>${Number(r.price).toFixed(4)}</td>
       <td>${countryLabel}</td>
       <td class="${r.country?'':'manual'}"><input type="text" data-idx="${idx}" data-field="paisSiscomex" value="${r.paisSiscomex}" placeholder="país"></td>
-      <td class="manual"><input type="number" step="0.001" data-idx="${idx}" data-field="pesoLiquido" value="${r.pesoLiquido}" placeholder="peso"></td>
+      <td class="${r.pesoLiquido===''?'manual':''}"><input type="number" step="0.0001" data-idx="${idx}" data-field="pesoLiquido" value="${r.pesoLiquido===''?'':Number(r.pesoLiquido).toFixed(4)}" placeholder="peso"></td>
       <td class="manual">
         <select data-idx="${idx}" data-field="regime">
           <option value="12" ${r.regime==='12'?'selected':''}>12</option>
@@ -449,6 +488,18 @@ function parseInvoiceLines(lines, fileName){
   // Company name: first non-empty line of the document
   pCompanyName = (lines.find(l=>l.trim()!=='') || '').trim();
 
+  // Peso líquido total da fatura: no PDF o rótulo "Total Net Wt (Kg)" e o valor
+  // aparecem em linhas separadas (layout em formulário), então pegamos a
+  // primeira linha puramente numérica logo depois do rótulo.
+  let pTotalNetWeight = null;
+  const wtIdx = lines.findIndex(l=>/Total\s+Net\s+Wt/i.test(l));
+  if(wtIdx >= 0){
+    for(let i=wtIdx+1; i<Math.min(wtIdx+3, lines.length); i++){
+      const m = lines[i].trim().match(/^([\d.,]+)$/);
+      if(m){ pTotalNetWeight = Number(m[1].replace(',', '.')); break; }
+    }
+  }
+
   // Line item regex (AGCO Invoice Detail Sheet layout)
   const re = /^(\S+)\s+(\S+)\s+(\d{9,12})\s+([\d.]+)\s+CST\s+([A-Z]{2})\s+(.+?)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)$/;
   let itemNo = 0;
@@ -476,7 +527,7 @@ function parseInvoiceLines(lines, fileName){
     });
   });
 
-  return {rows: pRows, invoiceNumber: pInvoiceNumber, invoiceDate: pInvoiceDate, companyName: pCompanyName, fileName};
+  return {rows: pRows, invoiceNumber: pInvoiceNumber, invoiceDate: pInvoiceDate, companyName: pCompanyName, fileName, totalNetWeight: pTotalNetWeight};
 }
 
 // ---------- Header rendering ----------
