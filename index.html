@@ -56,10 +56,13 @@
 <div class="wrap">
 
   <div class="card">
-    <h2>1. PDF da Fatura</h2>
+    <h2>1. Arquivo de origem</h2>
+    <div class="hint" style="margin-bottom:10px;">
+      Aceita o <b>PDF da fatura (dlog)</b> <i>ou</i> o <b>Excel do Sistema do cliente</b> (export com as colunas Part Number, Item Fatura, Valor Unitário etc). O Sistema já traz descrição, regime e peso prontos — só faltam Número/Data da fatura e o País em código Siscomex.
+    </div>
     <div class="dropzone" id="dropzone">
-      <div id="dzText">Arraste o PDF aqui ou clique para selecionar</div>
-      <input type="file" id="fileInput" accept="application/pdf">
+      <div id="dzText">Arraste o PDF ou o Excel do Sistema aqui, ou clique para selecionar</div>
+      <input type="file" id="fileInput" accept="application/pdf,.xlsx,.xlsm,.xls">
     </div>
     <div class="status" id="pdfStatus"></div>
   </div>
@@ -89,9 +92,11 @@
   <div class="card" id="itemsCard" style="display:none;">
     <h2>3. Itens — confira e complete os campos em amarelo</h2>
     <div class="hint">
-      Campos em <b>amarelo</b> não existem no PDF e precisam ser preenchidos manualmente: <b>Peso Líquido (kg)</b> e <b>Regime Aduaneiro</b>.
-      A ferramenta lembra esses valores por <b>Part Number</b> — da próxima vez que esse item aparecer em outra fatura, ele já vem preenchido sozinho.
-      O código Siscomex de país já é convertido automaticamente (ex: Alemanha → 023, Reino Unido → 628); ajuste manualmente se precisar.
+      Campos em <b>amarelo</b> precisam ser conferidos/preenchidos manualmente. Vindo do <b>PDF</b>: Peso Líquido e Regime Aduaneiro (o País já é convertido
+      automaticamente para o código Siscomex, ex: Alemanha → 023, Reino Unido → 628). Vindo do <b>Excel do Sistema</b>: Peso e Regime já vêm preenchidos
+      (extraídos do próprio Sistema), mas o <b>País Siscomex</b> precisa ser preenchido manualmente, pois o Sistema não guarda o país de fabricação por item.
+      A ferramenta lembra todos esses valores por <b>Part Number</b> — da próxima vez que esse item aparecer, em qualquer fatura ou fonte, ele já vem preenchido sozinho.
+      Confira também <b>NUM_FATURA</b> e <b>DATA_FATURA</b> acima quando a fonte for o Excel do Sistema (ele não guarda a data da fatura).
     </div>
     <div class="tablewrap"><table id="itemsTable">
       <thead>
@@ -172,6 +177,11 @@ function setStatus(msg, isError){
 }
 
 async function handleFile(file){
+  const isExcel = /\.(xlsx|xlsm|xls)$/i.test(file.name);
+  if(isExcel){
+    await handleSistemaFile(file);
+    return;
+  }
   setStatus('Lendo PDF...');
   try{
     const buf = await file.arrayBuffer();
@@ -211,6 +221,133 @@ async function handleFile(file){
     console.error(err);
     setStatus('Erro ao ler o PDF: ' + err.message, true);
   }
+}
+
+// ---------- Sistema (Excel do cliente) parsing ----------
+async function handleSistemaFile(file){
+  setStatus('Lendo Excel do Sistema...');
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array'});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(ws, {defval:''});
+
+    const norm = s => String(s).trim().toLowerCase();
+    const findKey = (headerRow, candidates) => {
+      const keys = Object.keys(headerRow);
+      for(const cand of candidates){
+        const hit = keys.find(k => norm(k).startsWith(norm(cand)));
+        if(hit) return hit;
+      }
+      return null;
+    };
+    if(data.length === 0) throw new Error('Planilha vazia ou sem cabeçalho reconhecido.');
+    const h = data[0];
+    const kPart = findKey(h, ['Part Number']);
+    const kDesc = findKey(h, ['Descrição']);
+    const kItem = findKey(h, ['Item Fatura']);
+    const kQty = findKey(h, ['Qtde']);
+    const kUnid = findKey(h, ['Unidade Medida']);
+    const kPrice = findKey(h, ['Valor Unitário']);
+    const kPeso = findKey(h, ['Peso Unitário']);
+    const kRegime = findKey(h, ['Reg. Aduaneiro']);
+    const kFabricante = findKey(h, ['Fabricante']);
+    // Nota: a coluna "País de Origem" do Sistema é o país de despacho/consignação
+    // (ex.: "275 [FRANCA]"), não o país de fabricação linha a linha exigido pelo
+    // Template — por isso NÃO usamos essa coluna para PAIS_ORIGEM.
+
+    if(!kPart || !kItem || !kPrice){
+      throw new Error('Não reconheci as colunas do Sistema. Verifique se o arquivo tem os cabeçalhos padrão (Part Number, Item Fatura, Valor Unitário...).');
+    }
+
+    rows = data.map(r=>{
+      const part = String(r[kPart]).trim();
+      const regimeTxt = kRegime ? String(r[kRegime]) : '';
+      const regimeMatch = regimeTxt.match(/^\s*(\d+)/);
+      const fabricanteTxt = kFabricante ? String(r[kFabricante]) : '';
+      const fabMatch = fabricanteTxt.match(/^\s*(\d+)/);
+      if(fabMatch && !document.getElementById('codExportador').value){
+        document.getElementById('codExportador').value = fabMatch[1];
+      }
+      if(fabricanteTxt && !document.getElementById('fabricanteNome').value){
+        document.getElementById('fabricanteNome').value = fabricanteTxt;
+      }
+      return {
+        itemNo: Number(r[kItem]) || '',
+        part,
+        description: kDesc ? String(r[kDesc]).trim() : '',
+        qty: kQty ? Number(r[kQty]) : '',
+        uos: 1,
+        price: kPrice ? Number(r[kPrice]) : 0,
+        country: '', // não vem do Sistema; preenchido por memória ou manualmente
+        countryName: '',
+        pesoUnitarioSistema: kPeso ? Number(r[kPeso]) : '',
+        regimeSistema: regimeMatch ? regimeMatch[1] : '12',
+      };
+    }).filter(r=>r.part);
+
+    // infer invoice number from filename, e.g. "Sistema - A1177203.xlsx"
+    const fnMatch = file.name.match(/([A-Z]\d{6,8})/);
+    if(fnMatch) invoiceNumber = fnMatch[1];
+    companyName = document.getElementById('fabricanteNome').value || companyName;
+
+    setStatus(`Excel do Sistema lido com sucesso: ${rows.length} itens encontrados. Confira NUM_FATURA/DATA_FATURA (não vêm no Sistema) e o País.`);
+    renderHeader();
+    renderTableFromSistema();
+  }catch(err){
+    console.error(err);
+    setStatus('Erro ao ler o Excel: ' + err.message, true);
+  }
+}
+
+function renderTableFromSistema(){
+  const tbody = document.getElementById('itemsBody');
+  tbody.innerHTML = '';
+  rows.forEach((r, idx)=>{
+    const mem = MEM.parts[r.part] || {};
+    r.pesoLiquido = mem.peso ?? (r.pesoUnitarioSistema !== '' ? r.pesoUnitarioSistema : '');
+    r.regime = mem.regime ?? r.regimeSistema ?? '12';
+    r.paisSiscomex = mem.pais ?? toSiscomex(r.country);
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.itemNo}</td>
+      <td>${r.part}</td>
+      <td>${r.description}</td>
+      <td>${r.qty}</td>
+      <td>PECA</td>
+      <td>${Number(r.price).toFixed(4)}</td>
+      <td>${r.country || '(preencher)'}</td>
+      <td class="manual"><input type="text" data-idx="${idx}" data-field="paisSiscomex" value="${r.paisSiscomex}" placeholder="país"></td>
+      <td class="manual"><input type="number" step="0.001" data-idx="${idx}" data-field="pesoLiquido" value="${r.pesoLiquido}" placeholder="peso"></td>
+      <td class="manual">
+        <select data-idx="${idx}" data-field="regime">
+          <option value="12" ${r.regime==='12'?'selected':''}>12</option>
+          <option value="61" ${r.regime==='61'?'selected':''}>61</option>
+        </select>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  attachTableHandlers(tbody);
+}
+
+function attachTableHandlers(tbody){
+  tbody.querySelectorAll('input,select').forEach(el=>{
+    el.addEventListener('change', e=>{
+      const idx = Number(e.target.dataset.idx);
+      const field = e.target.dataset.field;
+      rows[idx][field] = e.target.value;
+      if(field==='pesoLiquido' || field==='regime' || field==='paisSiscomex'){
+        const part = rows[idx].part;
+        if(!MEM.parts[part]) MEM.parts[part] = {};
+        if(field==='pesoLiquido') MEM.parts[part].peso = e.target.value;
+        if(field==='regime') MEM.parts[part].regime = e.target.value;
+        if(field==='paisSiscomex') MEM.parts[part].pais = e.target.value;
+        saveMemory(MEM);
+      }
+    });
+  });
 }
 
 function parseInvoice(lines){
@@ -311,21 +448,7 @@ function renderTable(){
     `;
     tbody.appendChild(tr);
   });
-
-  tbody.querySelectorAll('input,select').forEach(el=>{
-    el.addEventListener('change', e=>{
-      const idx = Number(e.target.dataset.idx);
-      const field = e.target.dataset.field;
-      rows[idx][field] = e.target.value;
-      if(field==='pesoLiquido' || field==='regime'){
-        const part = rows[idx].part;
-        if(!MEM.parts[part]) MEM.parts[part] = {};
-        if(field==='pesoLiquido') MEM.parts[part].peso = e.target.value;
-        if(field==='regime') MEM.parts[part].regime = e.target.value;
-        saveMemory(MEM);
-      }
-    });
-  });
+  attachTableHandlers(tbody);
 }
 
 // ---------- Export ----------
