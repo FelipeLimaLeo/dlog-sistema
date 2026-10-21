@@ -6,6 +6,7 @@
 <title>DLOG → Template Itens Fatura</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <style>
   :root{
     --bg:#f4f6f8; --card:#ffffff; --border:#dde3e8; --text:#1f2a33; --muted:#6b7684;
@@ -518,17 +519,57 @@ function buildExportRows(){
   }));
 }
 
-document.getElementById('exportBtn').addEventListener('click', ()=>{
+// Replica o layout exato do Template_Carga-de-Dados-ItensFatura: aba "Planilha1",
+// cabeçalho em negrito com fundo amarelo (Calibri 11), e as mesmas larguras de coluna.
+const TEMPLATE_COLUMNS = [
+  {key:'NUM_FATURA', width:12.71},
+  {key:'COD_EXPORTADOR', width:17.29},
+  {key:'DATA_FATURA', width:13.14},
+  {key:'PART_NUMBER', width:17.43},
+  {key:'NUM_ITEM', width:10.43},
+  {key:'VALOR_UNITARIO', width:15.86},
+  {key:'PESO_LIQUIDO', width:13.43},
+  {key:'COD_FABRICANTE', width:16.0},
+  {key:'PAIS_ORIGEM', width:12.57},
+  {key:'UNIDADE_COMERCIALIZADA', width:14.14},
+  {key:'REGIME', width:10.57},
+];
+
+async function buildTemplateWorkbook(data){
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Planilha1');
+  ws.columns = TEMPLATE_COLUMNS.map(c=>({header:c.key, key:c.key, width:c.width}));
+
+  const headerRow = ws.getRow(1);
+  headerRow.eachCell(cell=>{
+    cell.font = {name:'Calibri', size:11, bold:true};
+    cell.fill = {type:'pattern', pattern:'solid', fgColor:{argb:'FFFFFF00'}};
+  });
+
+  data.forEach(d=>{
+    const row = ws.addRow(d);
+    row.eachCell(cell=>{ cell.font = {name:'Calibri', size:11}; });
+    // PART_NUMBER sempre como texto, igual ao template original
+    const partCell = row.getCell('PART_NUMBER');
+    partCell.numFmt = '@';
+    partCell.value = String(d.PART_NUMBER);
+  });
+
+  return wb;
+}
+
+document.getElementById('exportBtn').addEventListener('click', async ()=>{
   const data = buildExportRows();
   const missingWeight = data.filter(d=>d.PESO_LIQUIDO==='').length;
-  const ws = XLSX.utils.json_to_sheet(data, {header:[
-    'NUM_FATURA','COD_EXPORTADOR','DATA_FATURA','PART_NUMBER','NUM_ITEM',
-    'VALOR_UNITARIO','PESO_LIQUIDO','COD_FABRICANTE','PAIS_ORIGEM',
-    'UNIDADE_COMERCIALIZADA','REGIME']});
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Planilha1');
-  const fname = (document.getElementById('numFatura').value.trim() || 'fatura') + '_ItensFatura.xlsx';
-  XLSX.writeFile(wb, fname);
+  const wb = await buildTemplateWorkbook(data);
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (document.getElementById('numFatura').value.trim() || 'fatura') + '_ItensFatura.xlsx';
+  a.click();
+  URL.revokeObjectURL(url);
   const statusEl = document.getElementById('exportStatus');
   statusEl.textContent = missingWeight>0
     ? `Exportado. Atenção: ${missingWeight} item(ns) sem Peso Líquido preenchido.`
