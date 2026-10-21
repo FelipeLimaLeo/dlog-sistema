@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DLOG → Template Itens Fatura</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#f4f6f8; --card:#ffffff; --border:#dde3e8; --text:#1f2a33; --muted:#6b7684;
+    --accent:#1f4e78; --accent2:#2e7d32; --warn:#c00000; --warnbg:#fff2f2; --manualbg:#fff8e1;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);}
+  header{background:var(--accent);color:#fff;padding:18px 24px;}
+  header h1{margin:0;font-size:20px;}
+  header p{margin:4px 0 0;font-size:13px;opacity:.85;}
+  .wrap{max-width:1300px;margin:20px auto;padding:0 16px 60px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:18px 20px;margin-bottom:18px;}
+  .card h2{margin:0 0 12px;font-size:15px;color:var(--accent);}
+  .row{display:flex;gap:16px;flex-wrap:wrap;}
+  .field{display:flex;flex-direction:column;gap:4px;min-width:180px;}
+  .field label{font-size:12px;font-weight:bold;color:var(--muted);}
+  .field input, .field select{padding:7px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;}
+  .dropzone{border:2px dashed var(--border);border-radius:8px;padding:28px;text-align:center;color:var(--muted);cursor:pointer;transition:.15s;}
+  .dropzone.drag{border-color:var(--accent);background:#eef4f9;}
+  .dropzone input{display:none;}
+  .btn{background:var(--accent);color:#fff;border:none;padding:9px 18px;border-radius:5px;font-size:13px;cursor:pointer;}
+  .btn:hover{filter:brightness(1.1);}
+  .btn.secondary{background:#55606b;}
+  .btn.green{background:var(--accent2);}
+  .btn:disabled{opacity:.5;cursor:not-allowed;}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th,td{border:1px solid var(--border);padding:5px 6px;text-align:left;white-space:nowrap;}
+  th{background:var(--accent);color:#fff;position:sticky;top:0;z-index:2;}
+  td input, td select{width:100%;border:none;background:transparent;font-size:12.5px;padding:2px;font-family:inherit;}
+  td.manual{background:var(--manualbg);}
+  tr:nth-child(even) td:not(.manual){background:#fafbfc;}
+  .tablewrap{max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:6px;}
+  .legend{display:flex;gap:18px;font-size:12px;color:var(--muted);margin-top:8px;flex-wrap:wrap;}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .swatch{width:12px;height:12px;border-radius:2px;border:1px solid var(--border);display:inline-block;}
+  .status{font-size:13px;color:var(--muted);margin-top:8px;}
+  .status.error{color:var(--warn);}
+  .footer-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px;}
+  .hint{font-size:12px;color:var(--muted);line-height:1.5;}
+  .pill{display:inline-block;background:#eef4f9;color:var(--accent);border-radius:12px;padding:2px 10px;font-size:11px;margin-left:8px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>DLOG → Template de Carga de Itens de Fatura</h1>
+  <p>Carregue o PDF da fatura (dlog), confira os dados extraídos automaticamente e exporte no layout exato do template.</p>
+</header>
+<div class="wrap">
+
+  <div class="card">
+    <h2>1. PDF da Fatura</h2>
+    <div class="dropzone" id="dropzone">
+      <div id="dzText">Arraste o PDF aqui ou clique para selecionar</div>
+      <input type="file" id="fileInput" accept="application/pdf">
+    </div>
+    <div class="status" id="pdfStatus"></div>
+  </div>
+
+  <div class="card" id="headerCard" style="display:none;">
+    <h2>2. Dados da Fatura</h2>
+    <div class="row">
+      <div class="field">
+        <label>NUM_FATURA</label>
+        <input type="text" id="numFatura">
+      </div>
+      <div class="field">
+        <label>DATA_FATURA</label>
+        <input type="date" id="dataFatura">
+      </div>
+      <div class="field">
+        <label>Fabricante / Exportador (nome)</label>
+        <input type="text" id="fabricanteNome">
+      </div>
+      <div class="field">
+        <label>COD_EXPORTADOR <span class="pill">lembrado por fornecedor</span></label>
+        <input type="text" id="codExportador" placeholder="ex: 30365">
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="itemsCard" style="display:none;">
+    <h2>3. Itens — confira e complete os campos em amarelo</h2>
+    <div class="hint">
+      Campos em <b>amarelo</b> não existem no PDF e precisam ser preenchidos manualmente: <b>Peso Líquido (kg)</b> e <b>Regime Aduaneiro</b>.
+      A ferramenta lembra esses valores por <b>Part Number</b> — da próxima vez que esse item aparecer em outra fatura, ele já vem preenchido sozinho.
+      O código Siscomex de país já é convertido automaticamente (ex: Alemanha → 023, Reino Unido → 628); ajuste manualmente se precisar.
+    </div>
+    <div class="tablewrap"><table id="itemsTable">
+      <thead>
+        <tr>
+          <th>Nº Item</th>
+          <th>Part Number</th>
+          <th>Descrição</th>
+          <th>Qtde</th>
+          <th>Unid.</th>
+          <th>Valor Unit.</th>
+          <th>País (PDF)</th>
+          <th>País Siscomex</th>
+          <th>Peso Líq. (kg)</th>
+          <th>Regime</th>
+        </tr>
+      </thead>
+      <tbody id="itemsBody"></tbody>
+    </table></div>
+    <div class="legend">
+      <span><span class="swatch" style="background:#fff8e1"></span>preenchimento manual (lembrado por part number)</span>
+    </div>
+    <div class="footer-actions">
+      <button class="btn green" id="exportBtn">Exportar XLSX (layout do Template)</button>
+      <button class="btn secondary" id="exportCsvBtn">Exportar CSV</button>
+      <span class="status" id="exportStatus"></span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ---------- persistent memory (localStorage) ----------
+const MEM_KEY = 'dlog_tool_memory_v1';
+function loadMemory(){
+  try{ return JSON.parse(localStorage.getItem(MEM_KEY)) || {parts:{}, exporters:{}}; }
+  catch(e){ return {parts:{}, exporters:{}}; }
+}
+function saveMemory(mem){
+  try{ localStorage.setItem(MEM_KEY, JSON.stringify(mem)); }catch(e){}
+}
+let MEM = loadMemory();
+
+// Siscomex country override table (ISO alpha-2 -> código numérico), demais países usam a própria sigla
+const COUNTRY_SISCOMEX = {
+  'DE':'023', // Alemanha
+  'GB':'628', // Reino Unido
+};
+function toSiscomex(iso2){
+  if(!iso2) return '';
+  return COUNTRY_SISCOMEX[iso2] || iso2;
+}
+
+let rows = []; // parsed line items
+let invoiceNumber = '';
+let invoiceDate = '';
+let companyName = '';
+
+// ---------- PDF parsing ----------
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+dropzone.addEventListener('click', ()=>fileInput.click());
+dropzone.addEventListener('dragover', e=>{e.preventDefault();dropzone.classList.add('drag');});
+dropzone.addEventListener('dragleave', ()=>dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', e=>{
+  e.preventDefault();dropzone.classList.remove('drag');
+  if(e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e=>{
+  if(e.target.files.length) handleFile(e.target.files[0]);
+});
+
+function setStatus(msg, isError){
+  const el = document.getElementById('pdfStatus');
+  el.textContent = msg;
+  el.className = 'status' + (isError ? ' error' : '');
+}
+
+async function handleFile(file){
+  setStatus('Lendo PDF...');
+  try{
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+    let allLines = [];
+    for(let p=1; p<=pdf.numPages; p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      // group words into lines by Y position (top), preserving X order
+      const items = content.items.map(it=>({
+        text: it.str,
+        x: it.transform[4],
+        y: Math.round(it.transform[5])
+      })).filter(it=>it.text.trim()!=='');
+      const byLine = {};
+      items.forEach(it=>{
+        // bucket by rounded y (tolerance)
+        let key = null;
+        for(const k of Object.keys(byLine)){
+          if(Math.abs(Number(k)-it.y) <= 2){ key = k; break; }
+        }
+        if(key===null) key = it.y;
+        if(!byLine[key]) byLine[key] = [];
+        byLine[key].push(it);
+      });
+      const lineYs = Object.keys(byLine).map(Number).sort((a,b)=>b-a);
+      lineYs.forEach(y=>{
+        const words = byLine[y].sort((a,b)=>a.x-b.x);
+        allLines.push(words.map(w=>w.text).join(' ').replace(/\s+/g,' ').trim());
+      });
+    }
+    parseInvoice(allLines);
+    setStatus(`PDF lido com sucesso: ${rows.length} itens encontrados.`);
+    renderHeader();
+    renderTable();
+  }catch(err){
+    console.error(err);
+    setStatus('Erro ao ler o PDF: ' + err.message, true);
+  }
+}
+
+function parseInvoice(lines){
+  rows = [];
+  invoiceNumber = '';
+  invoiceDate = '';
+  companyName = '';
+
+  const fullText = lines.join('\n');
+
+  // Invoice number + date: "A1177203 85354 011 ... 05/10/26 1Of 3USD 0.00"
+  const invMatch = fullText.match(/\b([A-Z]\d{6,8})\b\s+\d+\s+\d+\s+.*?(\d{2}\/\d{2}\/\d{2})\s+\d\s*Of/);
+  if(invMatch){
+    invoiceNumber = invMatch[1];
+    const d = invMatch[2].split('/'); // dd/mm/yy
+    const yy = (Number(d[2])<50?'20':'19')+d[2];
+    invoiceDate = `${yy}-${d[1]}-${d[0]}`;
+  }
+
+  // Company name: first non-empty line of the document
+  companyName = (lines.find(l=>l.trim()!=='') || '').trim();
+
+  // Line item regex (AGCO Invoice Detail Sheet layout)
+  const re = /^(\S+)\s+(\S+)\s+(\d{9,12})\s+([\d.]+)\s+CST\s+([A-Z]{2})\s+(.+?)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)$/;
+  let itemNo = 0;
+  lines.forEach(line=>{
+    const m = line.match(re);
+    if(m){
+      itemNo++;
+      const [, caseNo, part, order, lineNo, country, countryName, qty, uos, price, amount] = m;
+      rows.push({
+        itemNo,
+        caseNo, part, order, lineNo, country, countryName,
+        qty: Number(qty), uos: Number(uos), price: Number(price), amount: Number(amount),
+        description: '',
+      });
+    }
+  });
+
+  // descriptions are on the next physical line (e.g. "PINION 885518M5 923 8483908990") — capture first word(s) before the repeated part number
+  lines.forEach((line, idx)=>{
+    rows.forEach(r=>{
+      if(line.includes(r.part) && !re.test(line) && r.description===''){
+        const descMatch = line.match(new RegExp('^(.*?)' + r.part.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+        if(descMatch) r.description = descMatch[1].trim();
+      }
+    });
+  });
+}
+
+// ---------- Header rendering ----------
+function renderHeader(){
+  document.getElementById('headerCard').style.display = 'block';
+  document.getElementById('itemsCard').style.display = 'block';
+  document.getElementById('numFatura').value = invoiceNumber;
+  document.getElementById('dataFatura').value = invoiceDate;
+  document.getElementById('fabricanteNome').value = companyName;
+  const remembered = MEM.exporters[companyName];
+  document.getElementById('codExportador').value = remembered || '';
+  document.getElementById('fabricanteNome').addEventListener('change', e=>{
+    const v = e.target.value;
+    document.getElementById('codExportador').value = MEM.exporters[v] || '';
+  });
+  document.getElementById('codExportador').addEventListener('change', e=>{
+    const name = document.getElementById('fabricanteNome').value;
+    MEM.exporters[name] = e.target.value.trim();
+    saveMemory(MEM);
+  });
+}
+
+// ---------- Items table ----------
+function renderTable(){
+  const tbody = document.getElementById('itemsBody');
+  tbody.innerHTML = '';
+  rows.forEach((r, idx)=>{
+    const mem = MEM.parts[r.part] || {};
+    r.pesoLiquido = mem.peso ?? '';
+    r.regime = mem.regime ?? '12';
+    r.paisSiscomex = toSiscomex(r.country);
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.itemNo}</td>
+      <td>${r.part}</td>
+      <td>${r.description}</td>
+      <td>${r.qty}</td>
+      <td>PECA</td>
+      <td>${r.price.toFixed(4)}</td>
+      <td>${r.country} ${r.countryName}</td>
+      <td><input type="text" data-idx="${idx}" data-field="paisSiscomex" value="${r.paisSiscomex}"></td>
+      <td class="manual"><input type="number" step="0.001" data-idx="${idx}" data-field="pesoLiquido" value="${r.pesoLiquido}" placeholder="peso"></td>
+      <td class="manual">
+        <select data-idx="${idx}" data-field="regime">
+          <option value="12" ${r.regime==='12'?'selected':''}>12</option>
+          <option value="61" ${r.regime==='61'?'selected':''}>61</option>
+        </select>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  tbody.querySelectorAll('input,select').forEach(el=>{
+    el.addEventListener('change', e=>{
+      const idx = Number(e.target.dataset.idx);
+      const field = e.target.dataset.field;
+      rows[idx][field] = e.target.value;
+      if(field==='pesoLiquido' || field==='regime'){
+        const part = rows[idx].part;
+        if(!MEM.parts[part]) MEM.parts[part] = {};
+        if(field==='pesoLiquido') MEM.parts[part].peso = e.target.value;
+        if(field==='regime') MEM.parts[part].regime = e.target.value;
+        saveMemory(MEM);
+      }
+    });
+  });
+}
+
+// ---------- Export ----------
+function buildExportRows(){
+  const numFatura = document.getElementById('numFatura').value.trim();
+  const dataFaturaRaw = document.getElementById('dataFatura').value; // yyyy-mm-dd
+  const dataFatura = dataFaturaRaw ? dataFaturaRaw.replace(/-/g,'') : '';
+  const codExportador = document.getElementById('codExportador').value.trim();
+
+  return rows.map(r=>({
+    NUM_FATURA: numFatura,
+    COD_EXPORTADOR: codExportador ? Number(codExportador) : '',
+    DATA_FATURA: dataFatura ? Number(dataFatura) : '',
+    PART_NUMBER: r.part,
+    NUM_ITEM: r.itemNo,
+    VALOR_UNITARIO: r.price,
+    PESO_LIQUIDO: r.pesoLiquido === '' ? '' : Number(r.pesoLiquido),
+    COD_FABRICANTE: '',
+    PAIS_ORIGEM: r.paisSiscomex,
+    UNIDADE_COMERCIALIZADA: 'PECA',
+    REGIME: r.regime,
+  }));
+}
+
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  const data = buildExportRows();
+  const missingWeight = data.filter(d=>d.PESO_LIQUIDO==='').length;
+  const ws = XLSX.utils.json_to_sheet(data, {header:[
+    'NUM_FATURA','COD_EXPORTADOR','DATA_FATURA','PART_NUMBER','NUM_ITEM',
+    'VALOR_UNITARIO','PESO_LIQUIDO','COD_FABRICANTE','PAIS_ORIGEM',
+    'UNIDADE_COMERCIALIZADA','REGIME']});
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Planilha1');
+  const fname = (document.getElementById('numFatura').value.trim() || 'fatura') + '_ItensFatura.xlsx';
+  XLSX.writeFile(wb, fname);
+  const statusEl = document.getElementById('exportStatus');
+  statusEl.textContent = missingWeight>0
+    ? `Exportado. Atenção: ${missingWeight} item(ns) sem Peso Líquido preenchido.`
+    : 'Exportado com sucesso.';
+  statusEl.className = 'status' + (missingWeight>0?' error':'');
+});
+
+document.getElementById('exportCsvBtn').addEventListener('click', ()=>{
+  const data = buildExportRows();
+  const header = ['NUM_FATURA','COD_EXPORTADOR','DATA_FATURA','PART_NUMBER','NUM_ITEM',
+    'VALOR_UNITARIO','PESO_LIQUIDO','COD_FABRICANTE','PAIS_ORIGEM',
+    'UNIDADE_COMERCIALIZADA','REGIME'];
+  let csv = header.join(';') + '\n';
+  data.forEach(d=>{ csv += header.map(h=>d[h]).join(';') + '\n'; });
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (document.getElementById('numFatura').value.trim() || 'fatura') + '_ItensFatura.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
