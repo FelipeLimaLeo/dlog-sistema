@@ -58,11 +58,13 @@
   <div class="card">
     <h2>1. Arquivo de origem</h2>
     <div class="hint" style="margin-bottom:10px;">
-      Aceita o <b>PDF da fatura (dlog)</b> <i>ou</i> o <b>Excel do Sistema do cliente</b> (export com as colunas Part Number, Item Fatura, Valor Unitário etc). O Sistema já traz descrição, regime e peso prontos — só faltam Número/Data da fatura e o País em código Siscomex.
+      Arraste o <b>PDF da fatura (dlog)</b> e o <b>Excel do Sistema do cliente</b> <i>juntos</i> (selecione os dois arquivos de uma vez) para a ferramenta fazer o
+      <b>de-para automático</b> entre eles: ela casa cada linha do Sistema com a linha correspondente do PDF (por Part Number + Quantidade + Valor) e já traz o
+      País de cada item automaticamente. Também funciona com um arquivo só, mas aí sobra mais campo manual.
     </div>
     <div class="dropzone" id="dropzone">
-      <div id="dzText">Arraste o PDF ou o Excel do Sistema aqui, ou clique para selecionar</div>
-      <input type="file" id="fileInput" accept="application/pdf,.xlsx,.xlsm,.xls">
+      <div id="dzText">Arraste o PDF + o Excel do Sistema aqui (pode soltar os dois juntos), ou clique para selecionar</div>
+      <input type="file" id="fileInput" accept="application/pdf,.xlsx,.xlsm,.xls" multiple>
     </div>
     <div class="status" id="pdfStatus"></div>
   </div>
@@ -151,12 +153,17 @@ function toSiscomex(iso2){
   return COUNTRY_SISCOMEX[iso2] || iso2;
 }
 
-let rows = []; // parsed line items
+let rows = []; // final merged line items used by the table/export
 let invoiceNumber = '';
 let invoiceDate = '';
 let companyName = '';
 
-// ---------- PDF parsing ----------
+// raw per-source parses, kept separately so we can cross-reference (de-para)
+// when both a PDF and a Sistema Excel are loaded together
+let pdfSource = null;      // {rows, invoiceNumber, invoiceDate, companyName, fileName}
+let sistemaSource = null;  // {rows, invoiceNumber, companyName, codExportador, fileName}
+
+// ---------- file intake (PDF and/or Sistema Excel) ----------
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 dropzone.addEventListener('click', ()=>fileInput.click());
@@ -164,10 +171,10 @@ dropzone.addEventListener('dragover', e=>{e.preventDefault();dropzone.classList.
 dropzone.addEventListener('dragleave', ()=>dropzone.classList.remove('drag'));
 dropzone.addEventListener('drop', e=>{
   e.preventDefault();dropzone.classList.remove('drag');
-  if(e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  handleFiles(Array.from(e.dataTransfer.files));
 });
 fileInput.addEventListener('change', e=>{
-  if(e.target.files.length) handleFile(e.target.files[0]);
+  handleFiles(Array.from(e.target.files));
 });
 
 function setStatus(msg, isError){
@@ -176,139 +183,210 @@ function setStatus(msg, isError){
   el.className = 'status' + (isError ? ' error' : '');
 }
 
-async function handleFile(file){
-  const isExcel = /\.(xlsx|xlsm|xls)$/i.test(file.name);
-  if(isExcel){
-    await handleSistemaFile(file);
-    return;
-  }
-  setStatus('Lendo PDF...');
-  try{
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data: buf}).promise;
-    let allLines = [];
-    for(let p=1; p<=pdf.numPages; p++){
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      // group words into lines by Y position (top), preserving X order
-      const items = content.items.map(it=>({
-        text: it.str,
-        x: it.transform[4],
-        y: Math.round(it.transform[5])
-      })).filter(it=>it.text.trim()!=='');
-      const byLine = {};
-      items.forEach(it=>{
-        // bucket by rounded y (tolerance)
-        let key = null;
-        for(const k of Object.keys(byLine)){
-          if(Math.abs(Number(k)-it.y) <= 2){ key = k; break; }
-        }
-        if(key===null) key = it.y;
-        if(!byLine[key]) byLine[key] = [];
-        byLine[key].push(it);
-      });
-      const lineYs = Object.keys(byLine).map(Number).sort((a,b)=>b-a);
-      lineYs.forEach(y=>{
-        const words = byLine[y].sort((a,b)=>a.x-b.x);
-        allLines.push(words.map(w=>w.text).join(' ').replace(/\s+/g,' ').trim());
-      });
+async function handleFiles(files){
+  for(const file of files){
+    const isExcel = /\.(xlsx|xlsm|xls)$/i.test(file.name);
+    try{
+      if(isExcel){
+        sistemaSource = await parseSistemaFile(file);
+      }else{
+        pdfSource = await parsePdfFile(file);
+      }
+    }catch(err){
+      console.error(err);
+      setStatus('Erro ao ler ' + file.name + ': ' + err.message, true);
+      return;
     }
-    parseInvoice(allLines);
-    setStatus(`PDF lido com sucesso: ${rows.length} itens encontrados.`);
-    renderHeader();
-    renderTable();
-  }catch(err){
-    console.error(err);
-    setStatus('Erro ao ler o PDF: ' + err.message, true);
   }
+  recompute();
+}
+
+async function parsePdfFile(file){
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+  let allLines = [];
+  for(let p=1; p<=pdf.numPages; p++){
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    // group words into lines by Y position (top), preserving X order
+    const items = content.items.map(it=>({
+      text: it.str,
+      x: it.transform[4],
+      y: Math.round(it.transform[5])
+    })).filter(it=>it.text.trim()!=='');
+    const byLine = {};
+    items.forEach(it=>{
+      // bucket by rounded y (tolerance)
+      let key = null;
+      for(const k of Object.keys(byLine)){
+        if(Math.abs(Number(k)-it.y) <= 2){ key = k; break; }
+      }
+      if(key===null) key = it.y;
+      if(!byLine[key]) byLine[key] = [];
+      byLine[key].push(it);
+    });
+    const lineYs = Object.keys(byLine).map(Number).sort((a,b)=>b-a);
+    lineYs.forEach(y=>{
+      const words = byLine[y].sort((a,b)=>a.x-b.x);
+      allLines.push(words.map(w=>w.text).join(' ').replace(/\s+/g,' ').trim());
+    });
+  }
+  return parseInvoiceLines(allLines, file.name);
 }
 
 // ---------- Sistema (Excel do cliente) parsing ----------
-async function handleSistemaFile(file){
-  setStatus('Lendo Excel do Sistema...');
-  try{
-    const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, {type:'array'});
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(ws, {defval:''});
+async function parseSistemaFile(file){
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, {type:'array'});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const data = XLSX.utils.sheet_to_json(ws, {defval:''});
 
-    const norm = s => String(s).trim().toLowerCase();
-    const findKey = (headerRow, candidates) => {
-      const keys = Object.keys(headerRow);
-      for(const cand of candidates){
-        const hit = keys.find(k => norm(k).startsWith(norm(cand)));
-        if(hit) return hit;
-      }
-      return null;
-    };
-    if(data.length === 0) throw new Error('Planilha vazia ou sem cabeçalho reconhecido.');
-    const h = data[0];
-    const kPart = findKey(h, ['Part Number']);
-    const kDesc = findKey(h, ['Descrição']);
-    const kItem = findKey(h, ['Item Fatura']);
-    const kQty = findKey(h, ['Qtde']);
-    const kUnid = findKey(h, ['Unidade Medida']);
-    const kPrice = findKey(h, ['Valor Unitário']);
-    const kPeso = findKey(h, ['Peso Unitário']);
-    const kRegime = findKey(h, ['Reg. Aduaneiro']);
-    const kFabricante = findKey(h, ['Fabricante']);
-    // Nota: a coluna "País de Origem" do Sistema é o país de despacho/consignação
-    // (ex.: "275 [FRANCA]"), não o país de fabricação linha a linha exigido pelo
-    // Template — por isso NÃO usamos essa coluna para PAIS_ORIGEM.
-
-    if(!kPart || !kItem || !kPrice){
-      throw new Error('Não reconheci as colunas do Sistema. Verifique se o arquivo tem os cabeçalhos padrão (Part Number, Item Fatura, Valor Unitário...).');
+  const norm = s => String(s).trim().toLowerCase();
+  const findKey = (headerRow, candidates) => {
+    const keys = Object.keys(headerRow);
+    for(const cand of candidates){
+      const hit = keys.find(k => norm(k).startsWith(norm(cand)));
+      if(hit) return hit;
     }
+    return null;
+  };
+  if(data.length === 0) throw new Error('Planilha vazia ou sem cabeçalho reconhecido.');
+  const h = data[0];
+  const kPart = findKey(h, ['Part Number']);
+  const kDesc = findKey(h, ['Descrição']);
+  const kItem = findKey(h, ['Item Fatura']);
+  const kQty = findKey(h, ['Qtde']);
+  const kPrice = findKey(h, ['Valor Unitário']);
+  const kPeso = findKey(h, ['Peso Unitário']);
+  const kRegime = findKey(h, ['Reg. Aduaneiro']);
+  const kFabricante = findKey(h, ['Fabricante']);
+  // Nota: a coluna "País de Origem" do Sistema é o país de despacho/consignação
+  // (ex.: "275 [FRANCA]"), não o país de fabricação linha a linha exigido pelo
+  // Template — por isso NÃO usamos essa coluna para PAIS_ORIGEM.
 
-    rows = data.map(r=>{
-      const part = String(r[kPart]).trim();
-      const regimeTxt = kRegime ? String(r[kRegime]) : '';
-      const regimeMatch = regimeTxt.match(/^\s*(\d+)/);
-      const fabricanteTxt = kFabricante ? String(r[kFabricante]) : '';
-      const fabMatch = fabricanteTxt.match(/^\s*(\d+)/);
-      if(fabMatch && !document.getElementById('codExportador').value){
-        document.getElementById('codExportador').value = fabMatch[1];
-      }
-      if(fabricanteTxt && !document.getElementById('fabricanteNome').value){
-        document.getElementById('fabricanteNome').value = fabricanteTxt;
-      }
-      return {
-        itemNo: Number(r[kItem]) || '',
-        part,
-        description: kDesc ? String(r[kDesc]).trim() : '',
-        qty: kQty ? Number(r[kQty]) : '',
-        uos: 1,
-        price: kPrice ? Number(r[kPrice]) : 0,
-        country: '', // não vem do Sistema; preenchido por memória ou manualmente
-        countryName: '',
-        pesoUnitarioSistema: kPeso ? Number(r[kPeso]) : '',
-        regimeSistema: regimeMatch ? regimeMatch[1] : '12',
-      };
-    }).filter(r=>r.part);
-
-    // infer invoice number from filename, e.g. "Sistema - A1177203.xlsx"
-    const fnMatch = file.name.match(/([A-Z]\d{6,8})/);
-    if(fnMatch) invoiceNumber = fnMatch[1];
-    companyName = document.getElementById('fabricanteNome').value || companyName;
-
-    setStatus(`Excel do Sistema lido com sucesso: ${rows.length} itens encontrados. Confira NUM_FATURA/DATA_FATURA (não vêm no Sistema) e o País.`);
-    renderHeader();
-    renderTableFromSistema();
-  }catch(err){
-    console.error(err);
-    setStatus('Erro ao ler o Excel: ' + err.message, true);
+  if(!kPart || !kItem || !kPrice){
+    throw new Error('Não reconheci as colunas do Sistema. Verifique se o arquivo tem os cabeçalhos padrão (Part Number, Item Fatura, Valor Unitário...).');
   }
+
+  let codExportador = '', fabricanteNome = '';
+  const sRows = data.map(r=>{
+    const part = String(r[kPart]).trim();
+    const regimeTxt = kRegime ? String(r[kRegime]) : '';
+    const regimeMatch = regimeTxt.match(/^\s*(\d+)/);
+    const fabricanteTxt = kFabricante ? String(r[kFabricante]) : '';
+    const fabMatch = fabricanteTxt.match(/^\s*(\d+)/);
+    if(fabMatch && !codExportador) codExportador = fabMatch[1];
+    if(fabricanteTxt && !fabricanteNome) fabricanteNome = fabricanteTxt;
+    return {
+      itemNo: Number(r[kItem]) || '',
+      part,
+      description: kDesc ? String(r[kDesc]).trim() : '',
+      qty: kQty ? Number(r[kQty]) : '',
+      uos: 1,
+      price: kPrice ? Number(r[kPrice]) : 0,
+      pesoUnitarioSistema: kPeso ? Number(r[kPeso]) : '',
+      regimeSistema: regimeMatch ? regimeMatch[1] : '12',
+    };
+  }).filter(r=>r.part);
+
+  // infer invoice number from filename, e.g. "Sistema - A1177203.xlsx"
+  const fnMatch = file.name.match(/([A-Z]\d{6,8})/);
+
+  return {
+    rows: sRows,
+    invoiceNumber: fnMatch ? fnMatch[1] : '',
+    companyName: fabricanteNome,
+    codExportador,
+    fileName: file.name,
+  };
 }
 
-function renderTableFromSistema(){
+// ---------- de-para: cross-reference PDF rows with Sistema rows ----------
+// matches by Part Number (ignoring a leading "V" the PDF sometimes adds),
+// Quantity, and Unit Price — the same keys that uniquely identify a line
+// even when several rows share the same part number.
+function mergeSources(pdf, sistema){
+  const used = new Array(pdf.rows.length).fill(false);
+  const merged = sistema.rows.map(sRow=>{
+    let matchIdx = -1;
+    for(let i=0;i<pdf.rows.length;i++){
+      if(used[i]) continue;
+      const pRow = pdf.rows[i];
+      const pPart = pRow.part.replace(/^V/,'');
+      const sameQty = Number(pRow.qty) === Number(sRow.qty);
+      const samePrice = Math.abs(Number(pRow.price) - Number(sRow.price)) < 0.01;
+      if((pRow.part === sRow.part || pPart === sRow.part) && sameQty && samePrice){
+        matchIdx = i; break;
+      }
+    }
+    let country = '', countryName = '', matched = false;
+    if(matchIdx >= 0){
+      used[matchIdx] = true;
+      country = pdf.rows[matchIdx].country;
+      countryName = pdf.rows[matchIdx].countryName;
+      matched = true;
+    }
+    return {
+      itemNo: sRow.itemNo,
+      part: sRow.part,
+      description: sRow.description,
+      qty: sRow.qty,
+      uos: 1,
+      price: sRow.price,
+      country, countryName,
+      pesoUnitarioSistema: sRow.pesoUnitarioSistema,
+      regimeSistema: sRow.regimeSistema,
+      matched,
+    };
+  });
+  const unmatchedPdf = pdf.rows.filter((_,i)=>!used[i]);
+  return {merged, unmatchedCount: unmatchedPdf.length};
+}
+
+function recompute(){
+  if(pdfSource && sistemaSource){
+    const {merged, unmatchedCount} = mergeSources(pdfSource, sistemaSource);
+    rows = merged;
+    invoiceNumber = pdfSource.invoiceNumber || sistemaSource.invoiceNumber;
+    invoiceDate = pdfSource.invoiceDate;
+    companyName = pdfSource.companyName || sistemaSource.companyName;
+    if(sistemaSource.codExportador) document.getElementById('codExportador').value = sistemaSource.codExportador;
+    const notMatched = rows.filter(r=>!r.matched).length;
+    let msg = `De-para feito: ${rows.length} itens do Sistema, ${rows.length - notMatched} casados com o PDF (país preenchido automaticamente).`;
+    if(notMatched>0) msg += ` ${notMatched} item(ns) do Sistema sem correspondência no PDF — preencher o país manualmente.`;
+    if(unmatchedCount>0) msg += ` ${unmatchedCount} linha(s) do PDF não usadas (sobrando).`;
+    setStatus(msg);
+  }else if(pdfSource){
+    rows = pdfSource.rows;
+    invoiceNumber = pdfSource.invoiceNumber;
+    invoiceDate = pdfSource.invoiceDate;
+    companyName = pdfSource.companyName;
+    setStatus(`PDF lido com sucesso: ${rows.length} itens encontrados. Solte também o Excel do Sistema para casar peso/regime automaticamente.`);
+  }else if(sistemaSource){
+    rows = sistemaSource.rows.map(r=>({...r, country:'', countryName:''}));
+    invoiceNumber = sistemaSource.invoiceNumber;
+    invoiceDate = '';
+    companyName = sistemaSource.companyName;
+    if(sistemaSource.codExportador) document.getElementById('codExportador').value = sistemaSource.codExportador;
+    setStatus(`Excel do Sistema lido com sucesso: ${rows.length} itens encontrados. Confira NUM_FATURA/DATA_FATURA e o País. Solte também o PDF para casar o país automaticamente.`);
+  }else{
+    return;
+  }
+  renderHeader();
+  renderTable();
+}
+
+function renderTable(){
   const tbody = document.getElementById('itemsBody');
   tbody.innerHTML = '';
   rows.forEach((r, idx)=>{
     const mem = MEM.parts[r.part] || {};
-    r.pesoLiquido = mem.peso ?? (r.pesoUnitarioSistema !== '' ? r.pesoUnitarioSistema : '');
+    const pesoDefault = (r.pesoUnitarioSistema !== undefined && r.pesoUnitarioSistema !== '') ? r.pesoUnitarioSistema : '';
+    r.pesoLiquido = mem.peso ?? pesoDefault;
     r.regime = mem.regime ?? r.regimeSistema ?? '12';
     r.paisSiscomex = mem.pais ?? toSiscomex(r.country);
 
+    const countryLabel = r.country ? `${r.country} ${r.countryName||''}`.trim() : '(preencher)';
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${r.itemNo}</td>
@@ -317,8 +395,8 @@ function renderTableFromSistema(){
       <td>${r.qty}</td>
       <td>PECA</td>
       <td>${Number(r.price).toFixed(4)}</td>
-      <td>${r.country || '(preencher)'}</td>
-      <td class="manual"><input type="text" data-idx="${idx}" data-field="paisSiscomex" value="${r.paisSiscomex}" placeholder="país"></td>
+      <td>${countryLabel}</td>
+      <td class="${r.country?'':'manual'}"><input type="text" data-idx="${idx}" data-field="paisSiscomex" value="${r.paisSiscomex}" placeholder="país"></td>
       <td class="manual"><input type="number" step="0.001" data-idx="${idx}" data-field="pesoLiquido" value="${r.pesoLiquido}" placeholder="peso"></td>
       <td class="manual">
         <select data-idx="${idx}" data-field="regime">
@@ -350,25 +428,23 @@ function attachTableHandlers(tbody){
   });
 }
 
-function parseInvoice(lines){
-  rows = [];
-  invoiceNumber = '';
-  invoiceDate = '';
-  companyName = '';
+function parseInvoiceLines(lines, fileName){
+  const pRows = [];
+  let pInvoiceNumber = '', pInvoiceDate = '', pCompanyName = '';
 
   const fullText = lines.join('\n');
 
   // Invoice number + date: "A1177203 85354 011 ... 05/10/26 1Of 3USD 0.00"
   const invMatch = fullText.match(/\b([A-Z]\d{6,8})\b\s+\d+\s+\d+\s+.*?(\d{2}\/\d{2}\/\d{2})\s+\d\s*Of/);
   if(invMatch){
-    invoiceNumber = invMatch[1];
+    pInvoiceNumber = invMatch[1];
     const d = invMatch[2].split('/'); // dd/mm/yy
     const yy = (Number(d[2])<50?'20':'19')+d[2];
-    invoiceDate = `${yy}-${d[1]}-${d[0]}`;
+    pInvoiceDate = `${yy}-${d[1]}-${d[0]}`;
   }
 
   // Company name: first non-empty line of the document
-  companyName = (lines.find(l=>l.trim()!=='') || '').trim();
+  pCompanyName = (lines.find(l=>l.trim()!=='') || '').trim();
 
   // Line item regex (AGCO Invoice Detail Sheet layout)
   const re = /^(\S+)\s+(\S+)\s+(\d{9,12})\s+([\d.]+)\s+CST\s+([A-Z]{2})\s+(.+?)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)$/;
@@ -378,7 +454,7 @@ function parseInvoice(lines){
     if(m){
       itemNo++;
       const [, caseNo, part, order, lineNo, country, countryName, qty, uos, price, amount] = m;
-      rows.push({
+      pRows.push({
         itemNo,
         caseNo, part, order, lineNo, country, countryName,
         qty: Number(qty), uos: Number(uos), price: Number(price), amount: Number(amount),
@@ -388,14 +464,16 @@ function parseInvoice(lines){
   });
 
   // descriptions are on the next physical line (e.g. "PINION 885518M5 923 8483908990") — capture first word(s) before the repeated part number
-  lines.forEach((line, idx)=>{
-    rows.forEach(r=>{
+  lines.forEach((line)=>{
+    pRows.forEach(r=>{
       if(line.includes(r.part) && !re.test(line) && r.description===''){
         const descMatch = line.match(new RegExp('^(.*?)' + r.part.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
         if(descMatch) r.description = descMatch[1].trim();
       }
     });
   });
+
+  return {rows: pRows, invoiceNumber: pInvoiceNumber, invoiceDate: pInvoiceDate, companyName: pCompanyName, fileName};
 }
 
 // ---------- Header rendering ----------
@@ -416,39 +494,6 @@ function renderHeader(){
     MEM.exporters[name] = e.target.value.trim();
     saveMemory(MEM);
   });
-}
-
-// ---------- Items table ----------
-function renderTable(){
-  const tbody = document.getElementById('itemsBody');
-  tbody.innerHTML = '';
-  rows.forEach((r, idx)=>{
-    const mem = MEM.parts[r.part] || {};
-    r.pesoLiquido = mem.peso ?? '';
-    r.regime = mem.regime ?? '12';
-    r.paisSiscomex = toSiscomex(r.country);
-
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${r.itemNo}</td>
-      <td>${r.part}</td>
-      <td>${r.description}</td>
-      <td>${r.qty}</td>
-      <td>PECA</td>
-      <td>${r.price.toFixed(4)}</td>
-      <td>${r.country} ${r.countryName}</td>
-      <td><input type="text" data-idx="${idx}" data-field="paisSiscomex" value="${r.paisSiscomex}"></td>
-      <td class="manual"><input type="number" step="0.001" data-idx="${idx}" data-field="pesoLiquido" value="${r.pesoLiquido}" placeholder="peso"></td>
-      <td class="manual">
-        <select data-idx="${idx}" data-field="regime">
-          <option value="12" ${r.regime==='12'?'selected':''}>12</option>
-          <option value="61" ${r.regime==='61'?'selected':''}>61</option>
-        </select>
-      </td>
-    `;
-    tbody.appendChild(tr);
-  });
-  attachTableHandlers(tbody);
 }
 
 // ---------- Export ----------
