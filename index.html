@@ -163,6 +163,7 @@ let companyName = '';
 // when both a PDF and a Sistema Excel are loaded together
 let pdfSource = null;      // {rows, invoiceNumber, invoiceDate, companyName, fileName}
 let sistemaSource = null;  // {rows, invoiceNumber, companyName, codExportador, fileName}
+let codExportadorHint = ''; // número extraído agora da coluna "Fabricante" do Sistema
 
 // ---------- file intake (PDF and/or Sistema Excel) ----------
 const dropzone = document.getElementById('dropzone');
@@ -351,7 +352,7 @@ function recompute(){
     invoiceNumber = pdfSource.invoiceNumber || sistemaSource.invoiceNumber;
     invoiceDate = pdfSource.invoiceDate;
     companyName = pdfSource.companyName || sistemaSource.companyName;
-    if(sistemaSource.codExportador) document.getElementById('codExportador').value = sistemaSource.codExportador;
+    codExportadorHint = sistemaSource.codExportador || '';
     const notMatched = rows.filter(r=>!r.matched).length;
     let msg = `De-para feito: ${rows.length} itens do Sistema, ${rows.length - notMatched} casados com o PDF (país preenchido automaticamente).`;
     if(notMatched>0) msg += ` ${notMatched} item(ns) do Sistema sem correspondência no PDF — preencher o país manualmente.`;
@@ -362,13 +363,14 @@ function recompute(){
     invoiceNumber = pdfSource.invoiceNumber;
     invoiceDate = pdfSource.invoiceDate;
     companyName = pdfSource.companyName;
+    codExportadorHint = '';
     setStatus(`PDF lido com sucesso: ${rows.length} itens encontrados. Solte também o Excel do Sistema para casar peso/regime automaticamente.`);
   }else if(sistemaSource){
     rows = sistemaSource.rows.map(r=>({...r, country:'', countryName:''}));
     invoiceNumber = sistemaSource.invoiceNumber;
     invoiceDate = '';
     companyName = sistemaSource.companyName;
-    if(sistemaSource.codExportador) document.getElementById('codExportador').value = sistemaSource.codExportador;
+    codExportadorHint = sistemaSource.codExportador || '';
     setStatus(`Excel do Sistema lido com sucesso: ${rows.length} itens encontrados. Confira NUM_FATURA/DATA_FATURA e o País. Solte também o PDF para casar o país automaticamente.`);
   }else{
     return;
@@ -484,17 +486,25 @@ function renderHeader(){
   document.getElementById('numFatura').value = invoiceNumber;
   document.getElementById('dataFatura').value = invoiceDate;
   document.getElementById('fabricanteNome').value = companyName;
+  // Prioridade do COD_EXPORTADOR: 1) memória já aprendida para esse fornecedor,
+  // 2) número extraído agora da coluna "Fabricante" do Sistema (codExportadorHint),
+  // 3) em branco.
   const remembered = MEM.exporters[companyName];
-  document.getElementById('codExportador').value = remembered || '';
-  document.getElementById('fabricanteNome').addEventListener('change', e=>{
+  document.getElementById('codExportador').value = remembered || codExportadorHint || '';
+  if(codExportadorHint && !remembered){
+    MEM.exporters[companyName] = codExportadorHint;
+    saveMemory(MEM);
+  }
+  // onchange= em vez de addEventListener evita empilhar listeners a cada arquivo carregado
+  document.getElementById('fabricanteNome').onchange = e=>{
     const v = e.target.value;
     document.getElementById('codExportador').value = MEM.exporters[v] || '';
-  });
-  document.getElementById('codExportador').addEventListener('change', e=>{
+  };
+  document.getElementById('codExportador').onchange = e=>{
     const name = document.getElementById('fabricanteNome').value;
     MEM.exporters[name] = e.target.value.trim();
     saveMemory(MEM);
-  });
+  };
 }
 
 // ---------- Export ----------
