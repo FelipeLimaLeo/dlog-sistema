@@ -353,7 +353,7 @@ function mergeSources(pdf, sistema){
 // final bata exatamente com o total do PDF — tanto para acrescentar peso que falta
 // quanto para remover peso que sobra.
 function redistributeWeights(totalNetWeight){
-  if(totalNetWeight === null || totalNetWeight === undefined || !rows.length) return '';
+  if(totalNetWeight === null || totalNetWeight === undefined || !rows.length) return {msg:'', severe:false};
 
   const baseWeight = rows.map(r=>{
     const unit = (r.pesoUnitarioSistema !== undefined && r.pesoUnitarioSistema !== '')
@@ -366,16 +366,67 @@ function redistributeWeights(totalNetWeight){
 
   const value = rows.map(r=>(Number(r.price)||0) * (Number(r.qty)||0));
   const sumValue = value.reduce((a,b)=>a+b, 0);
-  if(sumValue <= 0) return `Peso do PDF: ${totalNetWeight} kg (não foi possível ratear: soma dos valores dos itens é zero).`;
+  if(sumValue <= 0) return {msg: `Peso do PDF: ${totalNetWeight} kg (não foi possível ratear: soma dos valores dos itens é zero).`, severe:true};
+
+  let newWeight;
+  let clippedCount = 0;
+
+  if(diff >= 0){
+    // Sobra peso pra distribuir: soma simples, sem limite superior — proporcional ao valor.
+    newWeight = baseWeight.map((w,i)=> w + diff * (value[i] / sumValue));
+  } else {
+    // Falta tirar peso: rateio "água até a borda" — nenhum item pode ficar negativo.
+    // Tira proporcionalmente ao valor; o item que estourar o próprio peso disponível
+    // fica zerado e a sobra da redução é redistribuída entre os itens que ainda têm
+    // peso, até acabar a diferença ou não sobrar mais nenhum item com peso.
+    let remaining = -diff;
+    newWeight = baseWeight.slice();
+    let active = newWeight.map((_,i)=>i).filter(i=>newWeight[i] > 0);
+    let guard = 0;
+    while(remaining > 1e-9 && active.length && guard < rows.length + 5){
+      guard++;
+      const activeValueSum = active.reduce((a,i)=>a+value[i], 0);
+      let cuts;
+      if(activeValueSum > 0){
+        cuts = active.map(i=>remaining * (value[i] / activeValueSum));
+      } else {
+        // nenhum valor nos itens restantes: reparte em partes iguais
+        cuts = active.map(()=>remaining / active.length);
+      }
+      let overflow = false;
+      const stillActive = [];
+      active.forEach((i, k)=>{
+        if(cuts[k] >= newWeight[i]){
+          remaining -= newWeight[i];
+          newWeight[i] = 0;
+          clippedCount++;
+          overflow = true;
+        } else {
+          stillActive.push(i);
+        }
+      });
+      if(!overflow){
+        active.forEach((i,k)=>{ newWeight[i] -= cuts[k]; });
+        remaining = 0;
+        break;
+      }
+      active = stillActive;
+    }
+  }
 
   rows.forEach((r,i)=>{
-    const newTotalWeight = baseWeight[i] + diff * (value[i] / sumValue);
     const qty = Number(r.qty) || 1;
-    r.pesoUnitarioSistema = Math.max(0, newTotalWeight / qty);
+    r.pesoUnitarioSistema = Math.max(0, newWeight[i] / qty);
   });
 
   const sign = diff >= 0 ? 'faltava' : 'sobrava';
-  return `Peso líquido rateado pelo valor dos itens: PDF ${totalNetWeight} kg × Sistema ${sumBase.toFixed(3)} kg (${sign} ${Math.abs(diff).toFixed(3)} kg, ajustado automaticamente).`;
+  let msg = `Peso líquido rateado pelo valor dos itens: PDF ${totalNetWeight} kg × Sistema ${sumBase.toFixed(3)} kg (${sign} ${Math.abs(diff).toFixed(3)} kg, ajustado automaticamente).`;
+  const severe = clippedCount > rows.length * 0.2;
+  if(clippedCount > 0){
+    msg += ` ATENÇÃO: ${clippedCount} de ${rows.length} item(ns) ficaram com peso zerado (a redução necessária era maior que o peso deles) e a sobra foi redistribuída nos demais.`;
+    if(severe) msg += ' O peso do Sistema está MUITO diferente do peso do PDF para esta fatura — revise manualmente antes de exportar.';
+  }
+  return {msg, severe};
 }
 
 function recompute(){
@@ -390,8 +441,9 @@ function recompute(){
     let msg = `De-para feito: ${rows.length} itens do Sistema, ${rows.length - notMatched} casados com o PDF (país preenchido automaticamente).`;
     if(notMatched>0) msg += ` ${notMatched} item(ns) do Sistema sem correspondência no PDF — preencher o país manualmente.`;
     if(unmatchedCount>0) msg += ` ${unmatchedCount} linha(s) do PDF não usadas (sobrando).`;
-    msg += ' ' + redistributeWeights(pdfSource.totalNetWeight);
-    setStatus(msg);
+    const rw1 = redistributeWeights(pdfSource.totalNetWeight);
+    msg += ' ' + rw1.msg;
+    setStatus(msg, rw1.severe);
   }else if(pdfSource){
     rows = pdfSource.rows;
     invoiceNumber = pdfSource.invoiceNumber;
@@ -399,8 +451,9 @@ function recompute(){
     companyName = pdfSource.companyName;
     codExportadorHint = '';
     let msg = `PDF lido com sucesso: ${rows.length} itens encontrados. Solte também o Excel do Sistema para casar peso/regime automaticamente.`;
-    msg += ' ' + redistributeWeights(pdfSource.totalNetWeight);
-    setStatus(msg);
+    const rw2 = redistributeWeights(pdfSource.totalNetWeight);
+    msg += ' ' + rw2.msg;
+    setStatus(msg, rw2.severe);
   }else if(sistemaSource){
     rows = sistemaSource.rows.map(r=>({...r, country:'', countryName:''}));
     invoiceNumber = sistemaSource.invoiceNumber;
