@@ -572,7 +572,7 @@ function buildExportRows(){
     PART_NUMBER: r.part,
     NUM_ITEM: r.itemNo,
     VALOR_UNITARIO: r.price,
-    PESO_LIQUIDO: r.pesoLiquido === '' ? '' : Number(r.pesoLiquido),
+    PESO_LIQUIDO: r.pesoLiquido === '' ? '' : Math.round(Number(r.pesoLiquido) * 10000) / 10000,
     COD_FABRICANTE: '',
     PAIS_ORIGEM: r.paisSiscomex,
     UNIDADE_COMERCIALIZADA: 'PECA',
@@ -614,6 +614,9 @@ async function buildTemplateWorkbook(data){
     const partCell = row.getCell('PART_NUMBER');
     partCell.numFmt = '@';
     partCell.value = String(d.PART_NUMBER);
+    // Peso líquido sempre com 4 casas decimais, igual ao padrão do template
+    const pesoCell = row.getCell('PESO_LIQUIDO');
+    if(typeof pesoCell.value === 'number') pesoCell.numFmt = '0.0000';
   });
 
   return wb;
