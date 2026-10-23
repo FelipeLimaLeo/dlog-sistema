@@ -541,6 +541,17 @@ function parseInvoiceLines(lines, fileName){
     }
   }
 
+  // Total da fatura: "Total of Invoice Lines" é a soma dos valores (Amount) de cada
+  // linha, cada um já arredondado a 2 casas no próprio PDF — por isso a soma exata de
+  // (Preço Unitário × Quantidade) que calculamos quase sempre difere alguns centavos
+  // desse total "oficial".
+  let pInvoiceLinesTotal = null;
+  const totLine = lines.find(l=>/Total of Invoice Lines/i.test(l));
+  if(totLine){
+    const m = totLine.match(/Total of Invoice Lines\s+([\d.,]+)/i);
+    if(m) pInvoiceLinesTotal = Number(m[1].replace(',', '.'));
+  }
+
   // Line item regex (AGCO Invoice Detail Sheet layout)
   const re = /^(\S+)\s+(\S+)\s+(\d{9,12})\s+([\d.]+)\s+CST\s+([A-Z]{2})\s+(.+?)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)$/;
   let itemNo = 0;
@@ -568,7 +579,7 @@ function parseInvoiceLines(lines, fileName){
     });
   });
 
-  return {rows: pRows, invoiceNumber: pInvoiceNumber, invoiceDate: pInvoiceDate, companyName: pCompanyName, fileName, totalNetWeight: pTotalNetWeight};
+  return {rows: pRows, invoiceNumber: pInvoiceNumber, invoiceDate: pInvoiceDate, companyName: pCompanyName, fileName, totalNetWeight: pTotalNetWeight, invoiceLinesTotal: pInvoiceLinesTotal};
 }
 
 // ---------- Header rendering ----------
@@ -608,9 +619,15 @@ function renderHeader(){
 // no total). Em vez de espalhar esse erro em todo mundo, jogamos a sobra inteira em UM
 // só item — de preferência um com quantidade 1, onde 1 passo de 0,0001 no peso unitário
 // muda o total em exatamente 0,0001 kg, fechando a conta sem sobrar resíduo nenhum.
-function roundWeightsToMatchTotal(pesoUnitRaw, qty, targetTotal){
+// Uso genérico: arredonda uma coluna "por unidade" (peso ou preço) a 4 casas decimais
+// e concentra a sobra de arredondamento em um único item (de preferência qty=1), em vez
+// de deixar o erro se espalhar por todos — serve tanto pra PESO_LIQUIDO quanto para
+// VALOR_UNITARIO, já que os dois têm o mesmo problema: o PDF declara um total (peso
+// líquido total, ou "Total of Invoice Lines") que é a soma de valores por linha já
+// arredondados, então multiplicar unitário × quantidade raramente bate centavo a centavo.
+function distributeResidualToMatchTotal(valuesRaw, qty, targetTotal){
   const UNIT = 0.0001;
-  const rounded = pesoUnitRaw.map(v => Math.round(v / UNIT) * UNIT);
+  const rounded = valuesRaw.map(v => Math.round(v / UNIT) * UNIT);
 
   if(targetTotal === null || targetTotal === undefined) return rounded;
 
@@ -643,9 +660,15 @@ function buildExportRows(){
 
   const pesoTarget = (pdfSource && pdfSource.totalNetWeight !== null && pdfSource.totalNetWeight !== undefined)
     ? pdfSource.totalNetWeight : null;
-  const pesosRaw = rows.map(r => r.pesoLiquido === '' ? 0 : Number(r.pesoLiquido));
+  const valorTarget = (pdfSource && pdfSource.invoiceLinesTotal !== null && pdfSource.invoiceLinesTotal !== undefined)
+    ? pdfSource.invoiceLinesTotal : null;
   const qtys = rows.map(r => Number(r.qty) || 0);
-  const pesosAjustados = roundWeightsToMatchTotal(pesosRaw, qtys, pesoTarget);
+
+  const pesosRaw = rows.map(r => r.pesoLiquido === '' ? 0 : Number(r.pesoLiquido));
+  const pesosAjustados = distributeResidualToMatchTotal(pesosRaw, qtys, pesoTarget);
+
+  const valoresRaw = rows.map(r => Number(r.price) || 0);
+  const valoresAjustados = distributeResidualToMatchTotal(valoresRaw, qtys, valorTarget);
 
   return rows.map((r,i)=>({
     NUM_FATURA: numFatura,
@@ -653,7 +676,7 @@ function buildExportRows(){
     DATA_FATURA: dataFatura ? Number(dataFatura) : '',
     PART_NUMBER: r.part,
     NUM_ITEM: r.itemNo,
-    VALOR_UNITARIO: r.price,
+    VALOR_UNITARIO: valoresAjustados[i],
     PESO_LIQUIDO: r.pesoLiquido === '' ? '' : pesosAjustados[i],
     COD_FABRICANTE: '',
     PAIS_ORIGEM: r.paisSiscomex,
