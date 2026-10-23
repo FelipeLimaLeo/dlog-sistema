@@ -600,20 +600,61 @@ function renderHeader(){
 }
 
 // ---------- Export ----------
+// Arredonda cada peso (por unidade) para 4 casas decimais SEM deixar a soma fugir do
+// total do PDF. O PESO_LIQUIDO do template é o peso POR UNIDADE (confirmado célula a
+// célula contra o template original), e o que precisa bater com o PDF é a soma de
+// peso_unitário × quantidade de cada linha. Arredondar cada unidade de forma
+// independente acumula erro proporcional à quantidade (itens com qty alta erram mais
+// no total). Em vez de espalhar esse erro em todo mundo, jogamos a sobra inteira em UM
+// só item — de preferência um com quantidade 1, onde 1 passo de 0,0001 no peso unitário
+// muda o total em exatamente 0,0001 kg, fechando a conta sem sobrar resíduo nenhum.
+function roundWeightsToMatchTotal(pesoUnitRaw, qty, targetTotal){
+  const UNIT = 0.0001;
+  const rounded = pesoUnitRaw.map(v => Math.round(v / UNIT) * UNIT);
+
+  if(targetTotal === null || targetTotal === undefined) return rounded;
+
+  let residual = targetTotal - rounded.reduce((a,v,i)=>a + v*(Number(qty[i])||0), 0);
+  const EPS = 1e-9;
+
+  const order = rounded.map((_,i)=>i)
+    .filter(i => Number(qty[i]) > 0)
+    .sort((a,b) => (Number(qty[a])||Infinity) - (Number(qty[b])||Infinity));
+
+  for(const i of order){
+    if(Math.abs(residual) < EPS) break;
+    const q = Number(qty[i]);
+    const deltaRounded = Math.round((residual / q) / UNIT) * UNIT;
+    if(Math.abs(deltaRounded) < EPS) continue;
+    const newVal = Math.max(0, rounded[i] + deltaRounded);
+    const actualDelta = newVal - rounded[i];
+    rounded[i] = newVal;
+    residual -= actualDelta * q;
+  }
+
+  return rounded;
+}
+
 function buildExportRows(){
   const numFatura = document.getElementById('numFatura').value.trim();
   const dataFaturaRaw = document.getElementById('dataFatura').value; // yyyy-mm-dd
   const dataFatura = dataFaturaRaw ? dataFaturaRaw.replace(/-/g,'') : '';
   const codExportador = document.getElementById('codExportador').value.trim();
 
-  return rows.map(r=>({
+  const pesoTarget = (pdfSource && pdfSource.totalNetWeight !== null && pdfSource.totalNetWeight !== undefined)
+    ? pdfSource.totalNetWeight : null;
+  const pesosRaw = rows.map(r => r.pesoLiquido === '' ? 0 : Number(r.pesoLiquido));
+  const qtys = rows.map(r => Number(r.qty) || 0);
+  const pesosAjustados = roundWeightsToMatchTotal(pesosRaw, qtys, pesoTarget);
+
+  return rows.map((r,i)=>({
     NUM_FATURA: numFatura,
     COD_EXPORTADOR: codExportador ? Number(codExportador) : '',
     DATA_FATURA: dataFatura ? Number(dataFatura) : '',
     PART_NUMBER: r.part,
     NUM_ITEM: r.itemNo,
     VALOR_UNITARIO: r.price,
-    PESO_LIQUIDO: r.pesoLiquido === '' ? '' : Math.round(Number(r.pesoLiquido) * 10000) / 10000,
+    PESO_LIQUIDO: r.pesoLiquido === '' ? '' : pesosAjustados[i],
     COD_FABRICANTE: '',
     PAIS_ORIGEM: r.paisSiscomex,
     UNIDADE_COMERCIALIZADA: 'PECA',
