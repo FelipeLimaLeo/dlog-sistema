@@ -188,13 +188,27 @@ function setStatus(msg, isError){
 }
 
 async function handleFiles(files){
+  let staleWarning = '';
   for(const file of files){
     const isExcel = /\.(xlsx|xlsm|xls)$/i.test(file.name);
     try{
       if(isExcel){
         sistemaSource = await parseSistemaFile(file);
+        // Se já havia um PDF carregado de OUTRA fatura (número diferente), ele é de
+        // uma fatura diferente desta — descarta para não misturar dados de faturas
+        // distintas no de-para (isso dava país errado e peso calculado com o total errado).
+        if(pdfSource && pdfSource.invoiceNumber && sistemaSource.invoiceNumber
+           && pdfSource.invoiceNumber !== sistemaSource.invoiceNumber){
+          staleWarning = `O PDF carregado antes era da fatura ${pdfSource.invoiceNumber}, diferente desta (${sistemaSource.invoiceNumber}) — ele foi descartado. Solte também o PDF desta fatura para casar o país automaticamente.`;
+          pdfSource = null;
+        }
       }else{
         pdfSource = await parsePdfFile(file);
+        if(sistemaSource && sistemaSource.invoiceNumber && pdfSource.invoiceNumber
+           && sistemaSource.invoiceNumber !== pdfSource.invoiceNumber){
+          staleWarning = `O Excel do Sistema carregado antes era da fatura ${sistemaSource.invoiceNumber}, diferente deste PDF (${pdfSource.invoiceNumber}) — ele foi descartado. Solte também o Excel desta fatura para casar peso/regime automaticamente.`;
+          sistemaSource = null;
+        }
       }
     }catch(err){
       console.error(err);
@@ -202,7 +216,7 @@ async function handleFiles(files){
       return;
     }
   }
-  recompute();
+  recompute(staleWarning);
 }
 
 async function parsePdfFile(file){
@@ -398,7 +412,8 @@ function redistributeWeights(totalNetWeight){
   return {msg, severe};
 }
 
-function recompute(){
+function recompute(staleWarning){
+  staleWarning = staleWarning || '';
   if(pdfSource && sistemaSource){
     const {merged, unmatchedCount} = mergeSources(pdfSource, sistemaSource);
     rows = merged;
@@ -412,7 +427,8 @@ function recompute(){
     if(unmatchedCount>0) msg += ` ${unmatchedCount} linha(s) do PDF não usadas (sobrando).`;
     const rw1 = redistributeWeights(pdfSource.totalNetWeight);
     msg += ' ' + rw1.msg;
-    setStatus(msg, rw1.severe);
+    if(staleWarning) msg = staleWarning + ' ' + msg;
+    setStatus(msg, rw1.severe || !!staleWarning);
   }else if(pdfSource){
     rows = pdfSource.rows;
     invoiceNumber = pdfSource.invoiceNumber;
@@ -422,14 +438,17 @@ function recompute(){
     let msg = `PDF lido com sucesso: ${rows.length} itens encontrados. Solte também o Excel do Sistema para casar peso/regime automaticamente.`;
     const rw2 = redistributeWeights(pdfSource.totalNetWeight);
     msg += ' ' + rw2.msg;
-    setStatus(msg, rw2.severe);
+    if(staleWarning) msg = staleWarning + ' ' + msg;
+    setStatus(msg, rw2.severe || !!staleWarning);
   }else if(sistemaSource){
     rows = sistemaSource.rows.map(r=>({...r, country:'', countryName:''}));
     invoiceNumber = sistemaSource.invoiceNumber;
     invoiceDate = '';
     companyName = sistemaSource.companyName;
     codExportadorHint = sistemaSource.codExportador || '';
-    setStatus(`Excel do Sistema lido com sucesso: ${rows.length} itens encontrados. Confira NUM_FATURA/DATA_FATURA e o País. Solte também o PDF para casar o país automaticamente.`);
+    let msg = `Excel do Sistema lido com sucesso: ${rows.length} itens encontrados. Confira NUM_FATURA/DATA_FATURA e o País. Solte também o PDF para casar o país automaticamente.`;
+    if(staleWarning) msg = staleWarning + ' ' + msg;
+    setStatus(msg, !!staleWarning);
   }else{
     return;
   }
