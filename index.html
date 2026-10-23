@@ -95,9 +95,10 @@
   <div class="card" id="itemsCard" style="display:none;">
     <h2>3. Itens — confira e complete os campos em amarelo</h2>
     <div class="hint">
-      <b>Peso Líquido:</b> rateado automaticamente. O PDF só traz o peso líquido TOTAL da fatura — a ferramenta compara com a soma do peso por item do
-      Sistema (que costuma vir errado) e distribui a diferença entre os itens proporcionalmente ao valor de cada um (quem vale mais, absorve mais da
-      diferença), pra mais ou pra menos, até bater exatamente com o total do PDF. Pode editar manualmente se precisar ajustar um item específico.
+      <b>Peso Líquido:</b> escalado automaticamente. O PDF só traz o peso líquido TOTAL da fatura — a ferramenta compara com a soma do peso por item do
+      Sistema (que costuma vir errado) e multiplica o peso de TODOS os itens pelo mesmo fator de correção, mantendo a proporção que já existe entre eles,
+      até bater exatamente com o total do PDF. Quando a diferença é grande (provável erro de unidade no Sistema), aparece um aviso em vermelho pra você
+      conferir. Pode editar manualmente se precisar ajustar um item específico.
       <br><b>País Siscomex:</b> convertido automaticamente quando vem do PDF (ex: Alemanha → 023, Reino Unido → 628); em <b>amarelo</b> quando precisa
       ser preenchido manualmente (o Sistema não guarda o país de fabricação por item). <b>Regime Aduaneiro</b> vem do Sistema quando disponível.
       A ferramenta lembra tudo por <b>Part Number</b> para a próxima fatura. Confira também <b>NUM_FATURA</b> e <b>DATA_FATURA</b> acima.
@@ -352,6 +353,12 @@ function mergeSources(pdf, sistema){
 // cada item proporcionalmente ao seu valor (qty × preço unitário), de modo que a soma
 // final bata exatamente com o total do PDF — tanto para acrescentar peso que falta
 // quanto para remover peso que sobra.
+// O PDF só traz o peso líquido TOTAL da fatura ("Total Net Wt (Kg)"), nunca por item.
+// O peso por item do Sistema costuma estar incorreto (às vezes por um fator de escala
+// inteiro — erro de unidade, duplicação etc). Em vez de redistribuir a diferença por
+// valor (o que pode zerar itens quando a diferença é grande), escalamos o peso de TODOS
+// os itens pelo mesmo fator (PDF total / soma do Sistema), preservando a proporção que
+// já existe entre os itens e garantindo que a soma final bata exatamente com o PDF.
 function redistributeWeights(totalNetWeight){
   if(totalNetWeight === null || totalNetWeight === undefined || !rows.length) return {msg:'', severe:false};
 
@@ -364,54 +371,23 @@ function redistributeWeights(totalNetWeight){
   const sumBase = baseWeight.reduce((a,b)=>a+b, 0);
   const diff = totalNetWeight - sumBase;
 
-  const value = rows.map(r=>(Number(r.price)||0) * (Number(r.qty)||0));
-  const sumValue = value.reduce((a,b)=>a+b, 0);
-  if(sumValue <= 0) return {msg: `Peso do PDF: ${totalNetWeight} kg (não foi possível ratear: soma dos valores dos itens é zero).`, severe:true};
-
   let newWeight;
-  let clippedCount = 0;
+  let msg;
+  const severe = sumBase > 0 && Math.abs(diff) > sumBase * 0.2;
 
-  if(diff >= 0){
-    // Sobra peso pra distribuir: soma simples, sem limite superior — proporcional ao valor.
-    newWeight = baseWeight.map((w,i)=> w + diff * (value[i] / sumValue));
+  if(sumBase > 0){
+    const factor = totalNetWeight / sumBase;
+    newWeight = baseWeight.map(w => w * factor);
+    msg = `Peso líquido escalado pelo mesmo fator em todos os itens: PDF ${totalNetWeight} kg ÷ Sistema ${sumBase.toFixed(3)} kg = fator ${factor.toFixed(4)}.`;
+    if(severe) msg += ' ATENÇÃO: a diferença entre o Sistema e o PDF é grande (provável erro de unidade/escala no Sistema) — confira antes de exportar.';
   } else {
-    // Falta tirar peso: rateio "água até a borda" — nenhum item pode ficar negativo.
-    // Tira proporcionalmente ao valor; o item que estourar o próprio peso disponível
-    // fica zerado e a sobra da redução é redistribuída entre os itens que ainda têm
-    // peso, até acabar a diferença ou não sobrar mais nenhum item com peso.
-    let remaining = -diff;
-    newWeight = baseWeight.slice();
-    let active = newWeight.map((_,i)=>i).filter(i=>newWeight[i] > 0);
-    let guard = 0;
-    while(remaining > 1e-9 && active.length && guard < rows.length + 5){
-      guard++;
-      const activeValueSum = active.reduce((a,i)=>a+value[i], 0);
-      let cuts;
-      if(activeValueSum > 0){
-        cuts = active.map(i=>remaining * (value[i] / activeValueSum));
-      } else {
-        // nenhum valor nos itens restantes: reparte em partes iguais
-        cuts = active.map(()=>remaining / active.length);
-      }
-      let overflow = false;
-      const stillActive = [];
-      active.forEach((i, k)=>{
-        if(cuts[k] >= newWeight[i]){
-          remaining -= newWeight[i];
-          newWeight[i] = 0;
-          clippedCount++;
-          overflow = true;
-        } else {
-          stillActive.push(i);
-        }
-      });
-      if(!overflow){
-        active.forEach((i,k)=>{ newWeight[i] -= cuts[k]; });
-        remaining = 0;
-        break;
-      }
-      active = stillActive;
-    }
+    // Sem nenhum peso de base pra escalar (Sistema não trouxe peso algum): distribui
+    // o total do PDF proporcionalmente ao valor de cada item, como última alternativa.
+    const value = rows.map(r=>(Number(r.price)||0) * (Number(r.qty)||0));
+    const sumValue = value.reduce((a,b)=>a+b, 0);
+    if(sumValue <= 0) return {msg: `Peso do PDF: ${totalNetWeight} kg (não foi possível ratear: nenhum peso ou valor disponível nos itens).`, severe:true};
+    newWeight = value.map(v => totalNetWeight * (v / sumValue));
+    msg = `Peso líquido do PDF (${totalNetWeight} kg) distribuído proporcionalmente ao valor dos itens, pois o Sistema não trouxe nenhum peso.`;
   }
 
   rows.forEach((r,i)=>{
@@ -419,13 +395,6 @@ function redistributeWeights(totalNetWeight){
     r.pesoUnitarioSistema = Math.max(0, newWeight[i] / qty);
   });
 
-  const sign = diff >= 0 ? 'faltava' : 'sobrava';
-  let msg = `Peso líquido rateado pelo valor dos itens: PDF ${totalNetWeight} kg × Sistema ${sumBase.toFixed(3)} kg (${sign} ${Math.abs(diff).toFixed(3)} kg, ajustado automaticamente).`;
-  const severe = clippedCount > rows.length * 0.2;
-  if(clippedCount > 0){
-    msg += ` ATENÇÃO: ${clippedCount} de ${rows.length} item(ns) ficaram com peso zerado (a redução necessária era maior que o peso deles) e a sobra foi redistribuída nos demais.`;
-    if(severe) msg += ' O peso do Sistema está MUITO diferente do peso do PDF para esta fatura — revise manualmente antes de exportar.';
-  }
   return {msg, severe};
 }
 
